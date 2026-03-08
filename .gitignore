@@ -1,0 +1,10 @@
+# Arduino/IDE
+*.suo
+*.user
+*.db
+/build/
+/bin/
+
+# OS files
+.DS_Store
+Thumbs.db
