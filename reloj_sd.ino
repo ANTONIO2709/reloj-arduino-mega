@@ -4,7 +4,7 @@
 #include <SPI.h>           // Protocolo de comunicación para la SD
 #include <Wire.h>          // Protocolo I2C (Pines 20/21 en Mega)
 #include <RTClib.h>        // Librería para el reloj DS1307/DS3231
-#include <Adafruit_BMP085.h> // Librería para el sensor BMP085
+#include <DHT.h>             // Librería para el sensor DHT11
 
 // --- DEFINICIÓN DE PINES ---
 #define LCD_CS A3 
@@ -18,7 +18,10 @@
 // Inicializamos los objetos de hardware
 Elegoo_TFTLCD tft(LCD_CS, LCD_CD, LCD_WR, LCD_RD, LCD_RESET); 
 RTC_DS3231 rtc; // Cambiado a DS3231 para soporte total
-Adafruit_BMP085 bmp;
+#define DHTPIN 22
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+#define BUZZER_PIN 23
 
 // --- VARIABLES DE TIEMPO ---
 DateTime now_time;
@@ -28,7 +31,10 @@ bool refreshBackground = true;
 bool sd_present = false;
 bool rtc_present = false;
 bool rtc_is_ds3231 = false; // Nueva variable para el modelo
-bool bmp_present = false;
+bool dht_present = false;
+float maxTemp = -999.0;
+float minTemp = 999.0;
+int lastDay = -1;
 
 // Nombres de los días de la semana en español
 const char daysOfTheWeek[7][4] = {"DOM", "LUN", "MAR", "MIE", "JUE", "VIE", "SAB"};
@@ -109,7 +115,8 @@ void setup(void) {
     // --- AJUSTE DE HORA ---
     // Si la hora esta mal, quita las "//" de la linea de abajo, sube el codigo, 
     // y luego vuelve a poner las "//" y sube el codigo otra vez.
-    // rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
+    // 
+    //rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); 
 
     if (rtc.lostPower()) {
       Serial.println(F("RTC perdio la energia, ajustando hora..."));
@@ -117,15 +124,23 @@ void setup(void) {
     }
   }
 
-  // Iniciar BMP085
-  if (!bmp.begin()) {
+  // Iniciar Zumbador y pitar al inicio
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(500);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Iniciar DHT11
+  dht.begin();
+  float t = dht.readTemperature();
+  if (isnan(t)) {
     tft.setTextColor(0xF800); 
-    tft.println("- BMP085: No encontrado");
-    bmp_present = false;
+    tft.println("- DHT11: No encontrado / Error");
+    dht_present = false;
   } else {
     tft.setTextColor(0x07E0); 
-    tft.println("- BMP085: OK");
-    bmp_present = true;
+    tft.println("- DHT11: OK");
+    dht_present = true;
   }
 
   delay(3000); 
@@ -162,6 +177,35 @@ void loop() {
     dibujarReloj(false); 
   }
   
+  // --- PÍTIDO HORARIO ---
+  static int lastHour = -1;
+  if (now_time.hour() != lastHour) {
+    if (lastHour != -1) { // No pitar al arrancar
+      Serial.println(F("¡Hora en punto! Pitido..."));
+      digitalWrite(BUZZER_PIN, HIGH);
+      delay(500);
+      digitalWrite(BUZZER_PIN, LOW);
+    }
+    lastHour = now_time.hour();
+  }
+
+  // --- TEMPERATURAS MÁXIMA / MÍNIMA ---
+  if (dht_present) {
+    float currentTemp = dht.readTemperature();
+    if (!isnan(currentTemp)) {
+      // Reinicio diario a las 00:00
+      if (now_time.day() != lastDay) {
+        maxTemp = currentTemp;
+        minTemp = currentTemp;
+        lastDay = now_time.day();
+        Serial.println(F("Nuevo día: Reiniciando Max/Min"));
+      }
+      
+      if (currentTemp > maxTemp) maxTemp = currentTemp;
+      if (currentTemp < minTemp) minTemp = currentTemp;
+    }
+  }
+
   delay(500); 
 }
 
@@ -216,7 +260,7 @@ void dibujarReloj(bool fullRedraw) {
   if (now_time.minute() != lastM || fullRedraw) {
     lastM = now_time.minute();
 
-    int boxW = 220;
+    int boxW = 240;
     int boxH = 130; // Aumentamos altura para añadir la altitud
     int boxX = (tft.width() - boxW) / 2;
     int boxY = (tft.height() - boxH) / 2;
@@ -251,21 +295,32 @@ void dibujarReloj(bool fullRedraw) {
 
     // DATOS SENSORES (Abajo)
     tft.setTextSize(2);
-    // Fila 1: Temperatura BMP (Unica fiable)
-    float tempBMP = bmp_present ? bmp.readTemperature() : 0.0;
+    
+    // Lectura DHT11
+    float tempDHT = dht.readTemperature();
+    float humDHT = dht.readHumidity();
     
     tft.setTextColor(0x07E0); // Verde
-    tft.setCursor(boxX + 45, boxY + 85);
-    tft.print("TEMP: "); tft.print(tempBMP, 1); tft.print(" C");
+    tft.setCursor(boxX + 10, boxY + 85);
+    tft.print("TEMP: "); 
+    if (isnan(tempDHT)) tft.print("--"); else tft.print(tempDHT, 1);
+    tft.print(" C");
 
-    // Fila 2: Presion y Altitud
     tft.setTextColor(0x07FF); // Cyan
     tft.setCursor(boxX + 10, boxY + 105);
-    tft.print("P:"); tft.print(bmp_present ? (bmp.readPressure() / 100) : 0); tft.print("hP");
+    tft.print("HUM:  "); 
+    if (isnan(humDHT)) tft.print("--"); else tft.print(humDHT, 0);
+    tft.print(" %");
 
-    tft.setTextColor(0xF81F); // Magenta/Rosa
-    tft.setCursor(boxX + 115, boxY + 105);
-    tft.print("A:"); tft.print(bmp_present ? bmp.readAltitude() : 0, 0); tft.print("m");
+    // Max/Min (Pequeño al lado)
+    tft.setTextSize(1);
+    tft.setTextColor(0xF800); // Rojo para Max
+    tft.setCursor(boxX + 165, boxY + 85);
+    tft.print("MAX: "); tft.print(maxTemp, 1);
+    
+    tft.setTextColor(0x001F); // Azul para Min
+    tft.setCursor(boxX + 165, boxY + 105);
+    tft.print("MIN: "); tft.print(minTemp, 1);
   }
 }
 
